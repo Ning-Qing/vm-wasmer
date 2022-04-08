@@ -1,4 +1,4 @@
-module chainmaker.org/chainmaker/vm-wasmer/v2
+module github.com/Ning-Qing/vm-wasmer
 
 go 1.15
 

@@ -24,7 +24,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"chainmaker.org/chainmaker/vm-wasmer/v2/wasmer-go"
+	"github.com/Ning-Qing/vm-wasmer/wasmer-go"
 )
 
 func main() {

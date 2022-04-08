@@ -16,6 +16,6 @@ import "C"
 
 // See https://github.com/golang/go/issues/26366.
 import (
-	_ "chainmaker.org/chainmaker/vm-wasmer/v2/wasmer-go/packaged/include"
-	_ "chainmaker.org/chainmaker/vm-wasmer/v2/wasmer-go/packaged/lib"
+	_ "github.com/Ning-Qing/vm-wasmer/wasmer-go/packaged/include"
+	_ "github.com/Ning-Qing/vm-wasmer/wasmer-go/packaged/lib"
 )

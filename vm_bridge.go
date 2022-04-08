@@ -16,7 +16,7 @@ import (
 	"chainmaker.org/chainmaker/logger/v2"
 	"chainmaker.org/chainmaker/vm/v2"
 
-	"chainmaker.org/chainmaker/vm-wasmer/v2/wasmer-go"
+	"github.com/Ning-Qing/vm-wasmer/wasmer-go"
 
 	"chainmaker.org/chainmaker/common/v2/serialize"
 	"chainmaker.org/chainmaker/protocol/v2"

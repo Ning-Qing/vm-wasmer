@@ -17,7 +17,7 @@ import (
 	"chainmaker.org/chainmaker/common/v2/serialize"
 	commonPb "chainmaker.org/chainmaker/pb-go/v2/common"
 	"chainmaker.org/chainmaker/protocol/v2"
-	"chainmaker.org/chainmaker/vm-wasmer/v2/wasmer-go"
+	"github.com/Ning-Qing/vm-wasmer/wasmer-go"
 )
 
 // SimContext record the contract context
