@@ -1,282 +1,285 @@
 package wasmer
 
-// #include <wasmer.h>
-//
-// #define own
-//
-// // We can't create a `wasm_byte_vec_t` directly in Go otherwise cgo
-// // complains with “Go pointer to Go pointer”. The hack consists at
-// // creating the `wasm_byte_vec_t` directly in C.
-//
-// own wasm_module_t* to_wasm_module_new(wasm_store_t *store, uint8_t *bytes, size_t bytes_length) {
-//     wasm_byte_vec_t wasm_bytes;
-//     wasm_bytes.size = bytes_length;
-//     wasm_bytes.data = (wasm_byte_t*) bytes;
-//
-//     return wasm_module_new(store, &wasm_bytes);
-// }
-//
-// bool to_wasm_module_validate(wasm_store_t *store, uint8_t *bytes, size_t bytes_length) {
-//     wasm_byte_vec_t wasm_bytes;
-//     wasm_bytes.size = bytes_length;
-//     wasm_bytes.data = (wasm_byte_t*) bytes;
-//
-//     return wasm_module_validate(store, &wasm_bytes);
-// }
-//
-// wasm_module_t* to_wasm_module_deserialize(wasm_store_t *store, uint8_t *bytes, size_t bytes_length) {
-//     wasm_byte_vec_t serialized_bytes;
-//     serialized_bytes.size = bytes_length;
-//     serialized_bytes.data = (wasm_byte_t*) bytes;
-//
-//     return wasm_module_deserialize(store, &serialized_bytes);
-// }
-import "C"
 import (
-	"runtime"
+	"fmt"
+	"io/ioutil"
 	"unsafe"
 )
 
-// Module contains stateless WebAssembly code that has already been
-// compiled and can be instantiated multiple times.
-//
-// WebAssembly programs are organized into modules, which are the unit
-// of deployment, loading, and compilation. A module collects
-// definitions for types, functions, tables, memories, and globals. In
-// addition, it can declare imports and exports and provide
-// initialization logic in the form of data and element segments or a
-// start function.
-//
-// See also
-//
-// Specification: https://webassembly.github.io/spec/core/syntax/modules.html#modules
+// ReadBytes reads a `.wasm` file and returns its content as an array of bytes.
+func ReadBytes(filename string) ([]byte, error) {
+	return ioutil.ReadFile(filename)
+}
+
+// Validate validates a sequence of bytes that is supposed to represent a valid
+// WebAssembly module.
+func Validate(bytes []byte) bool {
+	return true == cWasmerValidate((*cUchar)(unsafe.Pointer(&bytes[0])), cUint(len(bytes)))
+}
+
+// ModuleError represents any kind of errors related to a WebAssembly
+// module.
+type ModuleError struct {
+	// Error message.
+	message string
+}
+
+// NewModuleError constructs a new `ModuleError`.
+func NewModuleError(message string) *ModuleError {
+	return &ModuleError{message}
+}
+
+// `ModuleError` is an actual error. The `Error` function returns the
+// error message.
+func (error *ModuleError) Error() string {
+	return error.message
+}
+
+// ExportDescriptor represents an export descriptor of a WebAssembly
+// module. It is different of an export of a WebAssembly instance. An
+// export descriptor only has a name and a kind/type.
+type ExportDescriptor struct {
+	// The export name.
+	Name string
+
+	// The export kind/type.
+	Kind ImportExportKind
+}
+
+// ImportExportKind represents an import/export descriptor kind/type.
+type ImportExportKind int
+
+const (
+	// ImportExportKindFunction represents an import/export descriptor of kind function.
+	ImportExportKindFunction = ImportExportKind(cWasmFunction)
+
+	// ImportExportKindGlobal represents an import/export descriptor of kind global.
+	ImportExportKindGlobal = ImportExportKind(cWasmGlobal)
+
+	// ImportExportKindMemory represents an import/export descriptor of kind memory.
+	ImportExportKindMemory = ImportExportKind(cWasmMemory)
+
+	// ImportExportKindTable represents an import/export descriptor of kind table.
+	ImportExportKindTable = ImportExportKind(cWasmTable)
+)
+
+// ImportDescriptor represents an import descriptor of a WebAssembly
+// module. It is different of an import of a WebAssembly instance. An
+// import descriptor only has a name, a namespace, and a kind/type.
+type ImportDescriptor struct {
+	// The import name.
+	Name string
+
+	// The import namespace.
+	Namespace string
+
+	// The import kind/type.
+	Kind ImportExportKind
+}
+
+// Module represents a WebAssembly module.
 type Module struct {
-	_inner *C.wasm_module_t
-	store  *Store
-	// Stored if computed to avoid further reallocations.
-	importTypes *importTypes
-	// Stored if computed to avoid further reallocations.
-	exportTypes *exportTypes
+	module  *cWasmerModuleT
+	Exports []ExportDescriptor
+	Imports []ImportDescriptor
 }
 
-// NewModule instantiates a new Module with the given Store.
-//
-// It takes two arguments, the Store and the Wasm module as a byte
-// array of WAT code.
-//
-//   wasmBytes := []byte(`...`)
-//   engine := wasmer.NewEngine()
-//   store := wasmer.NewStore(engine)
-//   module, err := wasmer.NewModule(store, wasmBytes)
-func NewModule(store *Store, bytes []byte) (*Module, error) {
-	wasmBytes, err := Wat2Wasm(string(bytes))
+// Compile compiles a WebAssembly module from bytes.
+func Compile(bytes []byte) (Module, error) {
+	var module *cWasmerModuleT
 
-	if err != nil {
-		return nil, err
+	var compileResult = cWasmerCompile(
+		&module,
+		(*cUchar)(unsafe.Pointer(&bytes[0])),
+		cUint(len(bytes)),
+	)
+
+	var emptyModule = Module{module: nil}
+
+	if compileResult != cWasmerOk {
+		return emptyModule, NewModuleError("Failed to compile the module.")
 	}
 
-	var wasmBytesPtr *C.uint8_t
-	wasmBytesLength := len(wasmBytes)
+	var exports = moduleExports(module)
+	var imports = moduleImports(module)
 
-	if wasmBytesLength > 0 {
-		wasmBytesPtr = (*C.uint8_t)(unsafe.Pointer(&wasmBytes[0]))
+	return Module{module, exports, imports}, nil
+}
+
+func moduleExports(module *cWasmerModuleT) []ExportDescriptor {
+	var exportDescriptors *cWasmerExportDescriptorsT
+	cWasmerExportDescriptors(module, &exportDescriptors)
+	defer cWasmerExportDescriptorsDestroy(exportDescriptors)
+
+	var numberOfExportDescriptors = int(cWasmerExportDescriptorsLen(exportDescriptors))
+	var exports = make([]ExportDescriptor, numberOfExportDescriptors)
+
+	for nth := 0; nth < numberOfExportDescriptors; nth++ {
+		var exportDescriptor = cWasmerExportDescriptorsGet(exportDescriptors, cInt(nth))
+		var exportKind = cWasmerExportDescriptorKind(exportDescriptor)
+		var wasmExportName = cWasmerExportDescriptorName(exportDescriptor)
+		var exportName = cGoStringN((*cChar)(unsafe.Pointer(wasmExportName.bytes)), (cInt)(wasmExportName.bytes_len))
+
+		exports[nth] = ExportDescriptor{
+			Name: exportName,
+			Kind: ImportExportKind(exportKind),
+		}
 	}
 
-	var self *Module
+	return exports
+}
 
-	err2 := maybeNewErrorFromWasmer(func() bool {
-		self = &Module{
-			_inner: C.to_wasm_module_new(store.inner(), wasmBytesPtr, C.size_t(wasmBytesLength)),
-			store:  store,
+func moduleImports(module *cWasmerModuleT) []ImportDescriptor {
+	var importDescriptors *cWasmerImportDescriptorsT
+	cWasmerImportDescriptors(module, &importDescriptors)
+	defer cWasmerImportDescriptorsDestroy(importDescriptors)
+
+	var numberOfImportDescriptors = int(cWasmerImportDescriptorsLen(importDescriptors))
+	var imports = make([]ImportDescriptor, numberOfImportDescriptors)
+
+	for nth := 0; nth < numberOfImportDescriptors; nth++ {
+		var importDescriptor = cWasmerImportDescriptorsGet(importDescriptors, cInt(nth))
+		var importKind = cWasmerImportDescriptorKind(importDescriptor)
+		var wasmImportName = cWasmerImportDescriptorName(importDescriptor)
+		var importName = cGoStringN((*cChar)(unsafe.Pointer(wasmImportName.bytes)), (cInt)(wasmImportName.bytes_len))
+		var wasmImportNamespace = cWasmerImportDescriptorModuleName(importDescriptor)
+		var importNamespace = cGoStringN((*cChar)(unsafe.Pointer(wasmImportNamespace.bytes)), (cInt)(wasmImportNamespace.bytes_len))
+
+		imports[nth] = ImportDescriptor{
+			Name:      importName,
+			Namespace: importNamespace,
+			Kind:      ImportExportKind(importKind),
+		}
+	}
+
+	return imports
+}
+
+// Instantiate creates a new instance of the WebAssembly module.
+func (module *Module) Instantiate() (Instance, error) {
+	return module.InstantiateWithImports(NewImports())
+}
+
+// InstantiateWithImports creates a new instance with imports of the WebAssembly module.
+func (module *Module) InstantiateWithImports(imports *Imports) (Instance, error) {
+	return newInstanceWithImports(
+		imports,
+		func(wasmImportsCPointer *cWasmerImportT, numberOfImports int) (*cWasmerInstanceT, error) {
+			var instance *cWasmerInstanceT
+
+			var instantiateResult = cWasmerModuleInstantiate(
+				module.module,
+				&instance,
+				wasmImportsCPointer,
+				cInt(numberOfImports),
+			)
+
+			if instantiateResult != cWasmerOk {
+				var lastError, err = GetLastError()
+				var errorMessage = "Failed to instantiate the module:\n    %s"
+
+				if err != nil {
+					errorMessage = fmt.Sprintf(errorMessage, "(unknown details)")
+				} else {
+					errorMessage = fmt.Sprintf(errorMessage, lastError)
+				}
+
+				return nil, NewModuleError(errorMessage)
+			}
+
+			return instance, nil
+		},
+	)
+}
+
+// InstantiateWithImportObject creates a new instance of a WebAssembly module with an
+// `ImportObject`
+func (module *Module) InstantiateWithImportObject(importObject *ImportObject) (Instance, error) {
+	var instance *cWasmerInstanceT
+	var emptyInstance = Instance{instance: nil, imports: nil, Exports: nil, Memory: nil}
+
+	var instantiateResult = cWasmerModuleImportInstantiate(&instance, module.module, importObject.inner)
+
+	if instantiateResult != cWasmerOk {
+		var lastError, err = GetLastError()
+		var errorMessage = "Failed to instantiate the module:\n    %s"
+
+		if err != nil {
+			errorMessage = fmt.Sprintf(errorMessage, "(unknown details)")
+		} else {
+			errorMessage = fmt.Sprintf(errorMessage, lastError)
 		}
 
-		return self._inner == nil
-	})
-
-	if err2 != nil {
-		return nil, err2
+		return emptyInstance, NewModuleError(errorMessage)
 	}
 
-	runtime.SetFinalizer(self, func(self *Module) {
-		self.Close()
-	})
-
-	return self, nil
-}
-
-// ValidateModule validates a new Module against the given Store.
-//
-// It takes two arguments, the Store and the WebAssembly module as a
-// byte array. The function returns an error describing why the bytes
-// are invalid, otherwise it returns nil.
-//
-//   wasmBytes := []byte(`...`)
-//   engine := wasmer.NewEngine()
-//   store := wasmer.NewStore(engine)
-//   err := wasmer.ValidateModule(store, wasmBytes)
-//
-//   isValid := err != nil
-func ValidateModule(store *Store, bytes []byte) error {
-	wasmBytes, err := Wat2Wasm(string(bytes))
+	exports, memoryPointer, err := getExportsFromInstance(instance)
 
 	if err != nil {
-		return err
+		return emptyInstance, err
 	}
 
-	var wasmBytesPtr *C.uint8_t
-	wasmBytesLength := len(wasmBytes)
-
-	if wasmBytesLength > 0 {
-		wasmBytesPtr = (*C.uint8_t)(unsafe.Pointer(&wasmBytes[0]))
-	}
-
-	err2 := maybeNewErrorFromWasmer(func() bool {
-		return false == C.to_wasm_module_validate(store.inner(), wasmBytesPtr, C.size_t(wasmBytesLength))
-	})
-
-	if err2 != nil {
-		return err2
-	}
-
-	runtime.KeepAlive(bytes)
-	runtime.KeepAlive(wasmBytes)
-
-	return nil
-}
-
-func (self *Module) inner() *C.wasm_module_t {
-	return self._inner
-}
-
-// Name returns the Module's name.
-//
-// Note:️ This is not part of the standard Wasm C API. It is Wasmer specific.
-//
-//   wasmBytes := []byte(`(module $moduleName)`)
-//   engine := wasmer.NewEngine()
-//   store := wasmer.NewStore(engine)
-//   module, _ := wasmer.NewModule(store, wasmBytes)
-//   name := module.Name()
-func (self *Module) Name() string {
-	var name C.wasm_name_t
-
-	C.wasmer_module_name(self.inner(), &name)
-
-	goName := nameToString(&name)
-
-	C.wasm_name_delete(&name)
-
-	return goName
-}
-
-// Imports returns the Module's imports as an ImportType array.
-//
-//   wasmBytes := []byte(`...`)
-//   engine := wasmer.NewEngine()
-//   store := wasmer.NewStore(engine)
-//   module, _ := wasmer.NewModule(store, wasmBytes)
-//   imports := module.Imports()
-func (self *Module) Imports() []*ImportType {
-	if nil == self.importTypes {
-		self.importTypes = newImportTypes(self)
-	}
-
-	return self.importTypes.importTypes
-}
-
-// Exports returns the Module's exports as an ExportType array.
-//
-//   wasmBytes := []byte(`...`)
-//   engine := wasmer.NewEngine()
-//   store := wasmer.NewStore(engine)
-//   module, _ := wasmer.NewModule(store, wasmBytes)
-//   exports := module.Exports()
-func (self *Module) Exports() []*ExportType {
-	if nil == self.exportTypes {
-		self.exportTypes = newExportTypes(self)
-	}
-
-	return self.exportTypes.exportTypes
-}
-
-// Serialize serializes the module and returns the Wasm code as an byte array.
-//
-//   wasmBytes := []byte(`...`)
-//   engine := wasmer.NewEngine()
-//   store := wasmer.NewStore(engine)
-//   module, _ := wasmer.NewModule(store, wasmBytes)
-//   bytes := module.Serialize()
-func (self *Module) Serialize() ([]byte, error) {
-	var bytes C.wasm_byte_vec_t
-
-	err := maybeNewErrorFromWasmer(func() bool {
-		C.wasm_module_serialize(self.inner(), &bytes)
-
-		return bytes.data == nil
-	})
+	imports, err := importObject.Imports()
 
 	if err != nil {
-		return nil, err
+		return emptyInstance, NewModuleError(fmt.Sprintf("Could not get imports from ImportObject: %s", err))
 	}
 
-	goBytes := C.GoBytes(unsafe.Pointer(bytes.data), C.int(bytes.size))
-	C.wasm_byte_vec_delete(&bytes)
-
-	return goBytes, nil
+	return Instance{instance: instance, imports: imports, Exports: exports, Memory: memoryPointer}, nil
 }
 
-// DeserializeModule deserializes an byte array to a Module.
-//
-//   wasmBytes := []byte(`...`)
-//   engine := wasmer.NewEngine()
-//   store := wasmer.NewStore(engine)
-//   module, _ := wasmer.NewModule(store, wasmBytes)
-//   bytes := module.Serialize()
-//   //...
-//   deserializedModule := wasmer.DeserializeModule(store, bytes)
-func DeserializeModule(store *Store, bytes []byte) (*Module, error) {
-	var bytesPtr *C.uint8_t
-	bytesLength := len(bytes)
+// Serialize serializes the current module into a sequence of
+// bytes. Those bytes can be deserialized into a module with
+// `DeserializeModule`.
+func (module *Module) Serialize() ([]byte, error) {
+	var serializedModule *cWasmerSerializedModuleT
+	var serializeResult = cWasmerModuleSerialize(&serializedModule, module.module)
+	defer cWasmerSerializedModuleDestroy(serializedModule)
 
-	if bytesLength > 0 {
-		bytesPtr = (*C.uint8_t)(unsafe.Pointer(&bytes[0]))
+	if serializeResult != cWasmerOk {
+		return nil, NewModuleError("Failed to serialize the module.")
 	}
 
-	var self *Module
-
-	err := maybeNewErrorFromWasmer(func() bool {
-		self = &Module{
-			_inner: C.to_wasm_module_deserialize(store.inner(), bytesPtr, C.size_t(bytesLength)),
-			store:  store,
-		}
-
-		return self._inner == nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	runtime.SetFinalizer(self, func(self *Module) {
-		C.wasm_module_delete(self.inner())
-	})
-
-	return self, nil
+	return cWasmerSerializedModuleBytes(serializedModule), nil
 }
 
-// Force to close the Module.
-//
-// A runtime finalizer is registered on the Module, but it is possible
-// to force the destruction of the Module by calling Close manually.
-func (self *Module) Close() {
-	runtime.SetFinalizer(self, nil)
-	C.wasm_module_delete(self.inner())
+// DeserializeModule deserializes a sequence of bytes into a
+// module. Ideally, those bytes must come from `Module.Serialize`.
+func DeserializeModule(serializedModuleBytes []byte) (Module, error) {
+	var emptyModule = Module{module: nil}
 
-	if nil != self.importTypes {
-		self.importTypes.close()
+	if len(serializedModuleBytes) < 1 {
+		return emptyModule, NewModuleError("Serialized module bytes are empty.")
 	}
 
-	if nil != self.exportTypes {
-		self.exportTypes.close()
+	var serializedModule *cWasmerSerializedModuleT
+	var deserializeBytesResult = cWasmerSerializedModuleFromBytes(
+		&serializedModule,
+		(*cUint8T)(unsafe.Pointer(&serializedModuleBytes[0])),
+		cInt(len(serializedModuleBytes)),
+	)
+	defer cWasmerSerializedModuleDestroy(serializedModule)
+
+	if deserializeBytesResult != cWasmerOk {
+		return emptyModule, NewModuleError("Failed to reconstitute the serialized module from the given bytes.")
+	}
+
+	var module *cWasmerModuleT
+	var deserializeResult = cWasmerModuleDeserialize(&module, serializedModule)
+
+	if deserializeResult != cWasmerOk {
+		return emptyModule, NewModuleError("Failed to deserialize the module.")
+	}
+
+	var exports = moduleExports(module)
+	var imports = moduleImports(module)
+
+	return Module{module, exports, imports}, nil
+}
+
+// Close closes/frees a `Module`.
+func (module *Module) Close() {
+	if module.module != nil {
+		cWasmerModuleDestroy(module.module)
 	}
 }

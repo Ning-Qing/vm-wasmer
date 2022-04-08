@@ -8,68 +8,101 @@ SPDX-License-Identifier: Apache-2.0
 package wasmer
 
 import (
-	"bytes"
 	"fmt"
-	"testing"
 
+	"chainmaker.org/chainmaker/logger/v2"
+	commonPb "chainmaker.org/chainmaker/pb-go/v2/common"
 	"chainmaker.org/chainmaker/protocol/v2"
-	"github.com/stretchr/testify/assert"
+	"chainmaker.org/chainmaker/utils/v2"
 )
 
-func readWriteSet(txSimContext protocol.TxSimContext) ([]byte, error) {
-	rwSet := txSimContext.GetTxRWSet(true)
-	fmt.Printf("rwSet = %v \n", rwSet)
-
-	var result []byte
-	for _, w := range rwSet.TxWrites {
-		if bytes.Equal(w.Key, []byte("count#test_key")) {
-			result = w.Value
-		}
-	}
-	if result == nil {
-		return nil, fmt.Errorf("write set contain no 'count#test_key'")
-	}
-
-	return result, nil
+type RuntimeInstanceT struct {
+	pool    *vmPool
+	log     *logger.CMLogger
+	chainId string
 }
 
-func TestInvoke(t *testing.T) {
+func (r *RuntimeInstanceT) Pool() *vmPool {
+	return r.pool
+}
 
-	wasmBytes, contractId, logger := prepareContract("./testdata/rust-counter-2.0.0.wasm", t)
+// Invoke contract by call vm, implement protocol.RuntimeInstance
 
-	vmPool, err := newVmPool(&contractId, wasmBytes, logger)
-	if err != nil {
-		t.Fatalf("create vmPool error: %v", err)
+func (r *RuntimeInstanceT) Invoke(
+	contract *commonPb.Contract, method string,
+	byteCode []byte, parameters map[string][]byte,
+	txContext protocol.TxSimContext, gasUsed uint64) (contractResult *commonPb.ContractResult) {
+
+	logStr := fmt.Sprintf("wasmer runtime invoke[%s]: ", txContext.GetTx().Payload.TxId)
+	startTime := utils.CurrentTimeMillisSeconds()
+
+	// contract response
+	contractResult = &commonPb.ContractResult{
+		Code:    uint32(0),
+		Result:  nil,
+		Message: "",
 	}
-
+	var instanceInfo *wrappedInstance
 	defer func() {
-		vmPool.close()
+		endTime := utils.CurrentTimeMillisSeconds()
+		logStr = fmt.Sprintf("%s used time %d", logStr, endTime-startTime)
+		r.log.Debugf(logStr)
+		panicErr := recover()
+		if panicErr != nil {
+			contractResult.Code = 1
+			contractResult.Message = fmt.Sprint(panicErr)
+			if instanceInfo != nil {
+				instanceInfo.errCount++
+			}
+		}
 	}()
 
-	runtimeInst := RuntimeInstance{
-		pool:    vmPool,
-		log:     logger,
-		chainId: ChainId,
+	// if cross contract call, then new instance
+	if txContext.GetDepth() > 0 {
+		var err error
+		instanceInfo, err = r.pool.NewInstance()
+		defer r.pool.CloseInstance(instanceInfo)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		instanceInfo = r.pool.GetInstance()
+		defer r.pool.RevertInstance(instanceInfo)
 	}
 
-	parameters := make(map[string][]byte)
-	parameters["key"] = []byte("test_key")
-	fillingBaseParams(parameters)
+	instance := instanceInfo.wasmInstance
+	instance.SetGasUsed(gasUsed)
+	instance.SetGasLimit(protocol.GasLimit)
 
-	// 测试一次调用结果是否正确
-	txSimContext := prepareTxSimContext(ChainId, BlockVersion, ContractName, "increase", parameters, SnapshotMock{})
-	runtimeInst.Invoke(&contractId, "increase", wasmBytes, parameters, txSimContext, 0)
-	result, err := readWriteSet(txSimContext)
+	var sc = NewSimContext(method, r.log, r.chainId)
+	defer sc.removeCtxPointer()
+	sc.Contract = contract
+	sc.TxSimContext = txContext
+	sc.ContractResult = contractResult
+	sc.parameters = parameters
+	sc.Instance = instance
+
+	err := sc.CallMethod(instance)
 	if err != nil {
-		t.Fatalf("read write set error: %v", err)
+		r.log.Warnf("contract[%s] invoke failed, %s", contract.Name, err.Error())
 	}
-	assert.Equal(t, result, []byte{1, 0, 0, 0}, "increase result not as expect.")
 
-	// 测试第二次调用结果是否正确
-	runtimeInst.Invoke(&contractId, "increase", wasmBytes, parameters, txSimContext, 0)
-	result, err = readWriteSet(txSimContext)
-	if err != nil {
-		t.Fatalf("read write set error: %v", err)
+	// gas Log
+	gas := instance.GetGasUsed()
+	if gas > protocol.GasLimit {
+		err = fmt.Errorf("out of gas %d/%d", gas, int64(protocol.GasLimit))
 	}
-	assert.Equal(t, result, []byte{2, 0, 0, 0}, "increase result not as expect.")
+	logStr += fmt.Sprintf("used gas %d ", gas)
+	contractResult.GasUsed = gas
+	if err != nil {
+		contractResult.Code = 1
+		msg := fmt.Sprintf("contract[%s] invoke failed, %s", contract.Name, err.Error())
+		r.log.Errorf(msg)
+		contractResult.Message = msg
+		instanceInfo.errCount++
+		return contractResult
+	}
+	contractResult.ContractEvent = sc.ContractEvent
+	contractResult.GasUsed = gas
+	return contractResult
 }

@@ -7,9 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package wasmer
 
 import (
-	"errors"
-	"fmt"
+	"strconv"
 	"sync"
+	"unsafe"
 
 	"chainmaker.org/chainmaker/store/v2/types"
 
@@ -21,6 +21,17 @@ import (
 	"chainmaker.org/chainmaker/common/v2/serialize"
 	"chainmaker.org/chainmaker/protocol/v2"
 )
+
+// #include <stdlib.h>
+
+// extern int sysCall(void *context, int requestHeaderPtr, int requestHeaderLen, int requestBodyPtr, int requestBodyLen);
+// extern void logMessage(void *context, int pointer, int length);
+// extern int fdWrite(void *contextfd,int iovs,int iovsPtr ,int iovsLen,int nwrittenPtr);
+// extern int fdRead(void *contextfd,int iovs,int iovsPtr ,int iovsLen,int nwrittenPtr);
+// extern int fdClose(void *contextfd,int iovs,int iovsPtr ,int iovsLen,int nwrittenPtr);
+// extern int fdSeek(void *contextfd,int iovs,int iovsPtr ,int iovsLen,int nwrittenPtr);
+// extern void procExit(void *contextfd,int exitCode);
+import "C"
 
 var log = logger.GetLogger(logger.MODULE_VM)
 
@@ -41,67 +52,36 @@ func (s *WaciInstance) LogMessage() int32 {
 	return protocol.ContractSdkSignalResultSuccess
 }
 
-type CMEnvironment struct {
-	instance *wasmer.Instance
-}
-
-// logMessage print log to certFile
+// logMessage print log to file
 //export logMessage
-func logMessage(environment interface{}, args []wasmer.Value) ([]wasmer.Value, error) {
-	env, ok := environment.(*CMEnvironment)
-	if !ok {
-		return nil, fmt.Errorf("args 'environment' is not *CMEnvironment type")
-	}
-	instance := env.instance
-	if instance == nil {
-		return nil, errors.New("instance at Environment is nil")
-	}
-	exportMemory, err := instance.Exports.GetMemory("memory")
-	if err != nil {
-		return nil, err
-	}
+func logMessage(context unsafe.Pointer, pointer int32, length int32) {
+	var instanceContext = wasmer.IntoInstanceContext(context)
+	var memory = instanceContext.Memory().Data()
 
-	pointer := args[0].I32()
-	length := args[1].I32()
-	gotText := string(exportMemory.Data()[pointer : pointer+length])
-	log.Debug("wasmer log>> " + gotText)
-
-	return []wasmer.Value{}, nil
+	gotText := string(memory[pointer : pointer+length])
+	log.Debugf("wasmer log>> " + gotText)
 }
 
 // sysCall wasmer vm call chain entry
 //export sysCall
-func sysCall(environment interface{}, args []wasmer.Value) ([]wasmer.Value, error) {
+func sysCall(context unsafe.Pointer,
+	requestHeaderPtr int32, requestHeaderLen int32,
+	requestBodyPtr int32, requestBodyLen int32) int32 {
 
-	env, ok := environment.(*CMEnvironment)
-	if !ok {
-		return nil, errors.New("args 'environment' is not *CMEnvironment type")
-	}
-	instance := env.instance
-	if instance == nil {
-		return nil, errors.New("instance at Environment is nil")
-	}
-	exportMemory, err := instance.Exports.GetMemory("memory")
-	if err != nil {
-		return nil, err
-	}
-
-	requestHeaderPtr := args[0].I32()
-	requestHeaderLen := args[1].I32()
-	requestBodyPtr := args[2].I32()
-	requestBodyLen := args[3].I32()
 	if requestHeaderLen == 0 {
-		log.Error("wasmer-go log >> requestHeader is null.")
-		return []wasmer.Value{
-			wasmer.NewValue(protocol.ContractSdkSignalResultFail, wasmer.I32),
-		}, nil
+		log.Error("wasmer log>> requestHeader is null.")
+		return protocol.ContractSdkSignalResultFail
 	}
+
+	// get memory
+	instanceContext := wasmer.IntoInstanceContext(context)
+	memory := instanceContext.Memory().Data()
 
 	// get request header/body from memory
 	requestHeaderBytes := make([]byte, requestHeaderLen)
-	copy(requestHeaderBytes, exportMemory.Data()[requestHeaderPtr:requestHeaderPtr+requestHeaderLen])
+	copy(requestHeaderBytes, memory[requestHeaderPtr:requestHeaderPtr+requestHeaderLen])
 	requestBodyBytes := make([]byte, requestBodyLen)
-	copy(requestBodyBytes, exportMemory.Data()[requestBodyPtr:requestBodyPtr+requestBodyLen])
+	copy(requestBodyBytes, memory[requestBodyPtr:requestBodyPtr+requestBodyLen])
 	requestHeader := serialize.NewEasyCodecWithBytes(requestHeaderBytes)
 
 	// get SimContext number from request header
@@ -124,11 +104,11 @@ func sysCall(environment interface{}, args []wasmer.Value) ([]wasmer.Value, erro
 	waciInstance := &WaciInstance{
 		Sc:          simContext,
 		RequestBody: requestBodyBytes,
-		Memory:      exportMemory.Data(),
+		Memory:      memory,
 		ChainId:     simContext.ChainId,
 	}
 
-	log.Debugf("### enter syscall handling, method = '%v'", method)
+	log.Infof("### enter syscall handling, method = '%v'", method)
 	var ret int32
 	if ret = waciInstance.invoke(method); ret == protocol.ContractSdkSignalResultFail {
 		log.Infof("invoke WaciInstance error: method = %v", method)
@@ -136,13 +116,12 @@ func sysCall(environment interface{}, args []wasmer.Value) ([]wasmer.Value, erro
 
 	log.Debugf("### leave syscall handling, method = '%v'", method)
 
-	return []wasmer.Value{
-		wasmer.NewValue(ret, wasmer.I32),
-	}, nil
+	return ret
 }
 
 //nolint
 func (s *WaciInstance) invoke(method interface{}) int32 {
+	log.Infof("sysCall() => '%s' method", method)
 	switch method.(string) {
 	// common
 	case protocol.ContractMethodLogMessage:
@@ -235,9 +214,8 @@ func (s *WaciInstance) CallContract() int32 {
 }
 
 func (s *WaciInstance) callContractCore(isLen bool) int32 {
-	gasUsed := protocol.GasLimit - s.Sc.Instance.GetGasRemaining()
 	result, gas, specialTxType, err := wacsi.CallContract(s.RequestBody, s.Sc.TxSimContext, s.Memory,
-		s.Sc.GetStateCache, gasUsed, isLen)
+		s.Sc.GetStateCache, s.Sc.Instance.GetGasUsed(), isLen)
 	if result == nil {
 		s.Sc.GetStateCache = nil // reset data
 		//s.Sc.ContractEvent = nil
@@ -245,8 +223,8 @@ func (s *WaciInstance) callContractCore(isLen bool) int32 {
 		s.Sc.GetStateCache = result.Result // reset data
 		s.Sc.ContractEvent = append(s.Sc.ContractEvent, result.ContractEvent...)
 	}
+	s.Sc.Instance.SetGasUsed(gas)
 	s.Sc.SpecialTxType = specialTxType
-	s.Sc.Instance.SetGasLimit(protocol.GasLimit - gas)
 	if err != nil {
 		s.recordMsg(err.Error())
 		return protocol.ContractSdkSignalResultFail
@@ -307,36 +285,28 @@ func (s *WaciInstance) getPaillierResultCore(isLen bool) int32 {
 
 // wasi
 //export fdWrite
-func fdWrite(environment interface{}, args []wasmer.Value) ([]wasmer.Value, error) {
-	return []wasmer.Value{
-		wasmer.NewValue(protocol.ContractSdkSignalResultSuccess, wasmer.I32),
-	}, nil
+func fdWrite(context unsafe.Pointer, fd int32, iovsPtr int32, iovsLen int32, nwrittenPtr int32) (err int32) {
+	return protocol.ContractSdkSignalResultSuccess
 }
 
 //export fdRead
-func fdRead(environment interface{}, args []wasmer.Value) ([]wasmer.Value, error) {
-	return []wasmer.Value{
-		wasmer.NewValue(protocol.ContractSdkSignalResultSuccess, wasmer.I32),
-	}, nil
+func fdRead(context unsafe.Pointer, fd int32, iovsPtr int32, iovsLen int32, nwrittenPtr int32) (err int32) {
+	return protocol.ContractSdkSignalResultSuccess
 }
 
 //export fdClose
-func fdClose(environment interface{}, args []wasmer.Value) ([]wasmer.Value, error) {
-	return []wasmer.Value{
-		wasmer.NewValue(protocol.ContractSdkSignalResultSuccess, wasmer.I32),
-	}, nil
+func fdClose(context unsafe.Pointer, fd int32, iovsPtr int32, iovsLen int32, nwrittenPtr int32) (err int32) {
+	return protocol.ContractSdkSignalResultSuccess
 }
 
 //export fdSeek
-func fdSeek(environment interface{}, args []wasmer.Value) ([]wasmer.Value, error) {
-	return []wasmer.Value{
-		wasmer.NewValue(protocol.ContractSdkSignalResultSuccess, wasmer.I32),
-	}, nil
+func fdSeek(context unsafe.Pointer, fd int32, iovsPtr int32, iovsLen int32, nwrittenPtr int32) (err int32) {
+	return protocol.ContractSdkSignalResultSuccess
 }
 
 //export procExit
-func procExit(environment interface{}, args []wasmer.Value) ([]wasmer.Value, error) {
-	return []wasmer.Value{}, nil
+func procExit(context unsafe.Pointer, exitCode int32) {
+	panic("exit called by contract, code:" + strconv.Itoa(int(exitCode)))
 }
 
 func (s *WaciInstance) recordMsg(msg string) int32 {
@@ -362,7 +332,7 @@ type vmBridgeManager struct {
 }
 
 // GetVmBridgeManager get singleton vmBridgeManager struct
-func GetVmBridgeManager() *vmBridgeManager { //nolint
+func GetVmBridgeManager() *vmBridgeManager {
 	if bridgeSingleton == nil {
 		vmBridgeManagerMutex.Lock()
 		defer vmBridgeManagerMutex.Unlock()
@@ -398,106 +368,48 @@ func (b *vmBridgeManager) remove(k int32) {
 }
 
 // NewWasmInstance new wasm instance. Apply for new memory.
-func (b *vmBridgeManager) NewWasmInstance(store *wasmer.Store, byteCode []byte) (*wasmer.Instance, error) {
-	module, err := wasmer.NewModule(store, byteCode)
-	if err != nil {
-		return nil, err
-	}
-
-	env := CMEnvironment{instance: nil}
-	imports := b.GetImports(store, &env)
-	instance, err := wasmer.NewInstance(module, imports)
-	if err != nil {
-		return nil, err
-	}
-
-	env.instance = instance
-
-	return instance, err
+func (b *vmBridgeManager) NewWasmInstance(byteCode []byte) (wasmer.Instance, error) {
+	return wasmer.NewInstanceWithImports(byteCode, b.GetImports())
 }
 
 // GetImports return export interface to cgo
-func (b *vmBridgeManager) GetImports(store *wasmer.Store, env *CMEnvironment) *wasmer.ImportObject {
-	imports := wasmer.NewImportObject()
-
-	// syscall
-	syscall := wasmer.NewFunctionWithEnvironment(
-		store,
-		wasmer.NewFunctionType(
-			wasmer.NewValueTypes(wasmer.I32, wasmer.I32, wasmer.I32, wasmer.I32),
-			wasmer.NewValueTypes(wasmer.I32)),
-		env,
-		sysCall)
-	// log_message
-	logmessage := wasmer.NewFunctionWithEnvironment(
-		store,
-		wasmer.NewFunctionType(
-			wasmer.NewValueTypes(wasmer.I32, wasmer.I32),
-			wasmer.NewValueTypes()),
-		env,
-		logMessage)
-
-	imports.Register(
-		"env",
-		map[string]wasmer.IntoExtern{
-			"sys_call":    syscall,
-			"log_message": logmessage,
-		})
-
-	fdread := wasmer.NewFunctionWithEnvironment(
-		store,
-		wasmer.NewFunctionType(
-			wasmer.NewValueTypes(wasmer.I32, wasmer.I32, wasmer.I32, wasmer.I32),
-			wasmer.NewValueTypes(wasmer.I32)),
-		env,
-		fdRead)
-
-	fdwrite := wasmer.NewFunctionWithEnvironment(
-		store,
-		wasmer.NewFunctionType(
-			wasmer.NewValueTypes(wasmer.I32, wasmer.I32, wasmer.I32, wasmer.I32),
-			wasmer.NewValueTypes(wasmer.I32)),
-		env,
-		fdWrite)
-
-	fdclose := wasmer.NewFunctionWithEnvironment(
-		store,
-		wasmer.NewFunctionType(
-			wasmer.NewValueTypes(wasmer.I32, wasmer.I32, wasmer.I32, wasmer.I32),
-			wasmer.NewValueTypes(wasmer.I32)),
-		env,
-		fdClose)
-
-	fdseek := wasmer.NewFunctionWithEnvironment(
-		store,
-		wasmer.NewFunctionType(
-			wasmer.NewValueTypes(wasmer.I32, wasmer.I32, wasmer.I32, wasmer.I32),
-			wasmer.NewValueTypes(wasmer.I32)),
-		env,
-		fdSeek)
-
+func (b *vmBridgeManager) GetImports() *wasmer.Imports {
+	var err error
+	imports := wasmer.NewImports().Namespace("env")
+	if _, err = imports.Append("sys_call", sysCall, C.sysCall); err != nil {
+		panic("add 'sys_call' into Imports error")
+	}
+	// parameter explain:
+	// 	1、["log_message"]: rust extern "C" method name
+	//	2、[logMessage] go method ptr
+	//	3、[C.logMessage] cgo function pointer.
+	if _, err = imports.Append("log_message", logMessage, C.logMessage); err != nil {
+		panic("add 'log_message' into Imports error")
+	}
 	// for wacsi empty interface
-	imports.Register(
-		"wasi_unstable",
-		map[string]wasmer.IntoExtern{
-			"fd_read":  fdread,
-			"fd_write": fdwrite,
-			"fd_close": fdclose,
-			"fd_seek":  fdseek,
-		})
+	imports.Namespace("wasi_unstable")
 
-	procexit := wasmer.NewFunctionWithEnvironment(
-		store,
-		wasmer.NewFunctionType(wasmer.NewValueTypes(wasmer.I32), wasmer.NewValueTypes(wasmer.I32)),
-		env,
-		procExit)
+	if _, err = imports.Append("fd_write", fdWrite, C.fdWrite); err != nil {
+		panic("add 'fd_write' into Imports error")
+	}
+	if _, err = imports.Append("fd_read", fdRead, C.fdRead); err != nil {
+		panic("add 'fd_read' into Imports error")
+	}
+	if _, err = imports.Append("fd_close", fdClose, C.fdClose); err != nil {
+		panic("add 'fd_close' into Imports error")
+	}
+	if _, err = imports.Append("fd_seek", fdSeek, C.fdSeek); err != nil {
+		panic("add 'fd_seek' into Imports error")
+	}
 
-	// for wasi_snapshot_preview1
-	imports.Register(
-		"wasi_snapshot_preview1",
-		map[string]wasmer.IntoExtern{
-			"proc_exit": procexit,
-		})
+	imports.Namespace("wasi_snapshot_preview1")
+	if _, err = imports.Append("proc_exit", procExit, C.procExit); err != nil {
+		panic("add 'proc_exit' into Imports error")
+	}
+	//imports.Append("fd_write", fdWrite2, C.fdWrite2)
+	//imports.Append("environ_sizes_get", fdWrite, C.fdWrite)
+	//imports.Append("proc_exit", fdWrite, C.fdWrite)
+	//imports.Append("environ_get", fdWrite, C.fdWrite)
 
 	return imports
 }

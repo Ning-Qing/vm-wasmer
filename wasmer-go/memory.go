@@ -1,133 +1,131 @@
 package wasmer
 
-// #include <wasmer.h>
-import "C"
 import (
+	"fmt"
 	"reflect"
-	"runtime"
 	"unsafe"
 )
 
-// Memory is a vector of raw uninterpreted bytes.
-//
-// See also
-//
-// Specification: https://webassembly.github.io/spec/core/syntax/modules.html#memories
+// MemoryError represents any kind of errors related to a WebAssembly memory. It
+// is returned by `Memory` functions only.
+type MemoryError struct {
+	// Error message.
+	message string
+}
+
+// NewMemoryError constructs a new `MemoryError`.
+func NewMemoryError(message string) *MemoryError {
+	return &MemoryError{message}
+}
+
+// `MemoryError` is an actual error. The `Error` function returns
+// the error message.
+func (error *MemoryError) Error() string {
+	return error.message
+}
+
+// Memory represents a WebAssembly memory. To read and write _data,
+// please see the `Data` function. The memory can be owned or
+// borrowed. It is only possible to create an owned memory from the
+// user-land.
 type Memory struct {
-	_inner   *C.wasm_memory_t
-	_ownedBy interface{}
+	memory *cWasmerMemoryT
+
+	// If set to true, the memory can be freed.
+	owned bool
 }
 
-func newMemory(pointer *C.wasm_memory_t, ownedBy interface{}) *Memory {
-	memory := &Memory{_inner: pointer, _ownedBy: ownedBy}
+// NewMemory instantiates a new owned WebAssembly memory, bound for
+// imported memory.
+func NewMemory(min, max uint32) (*Memory, error) {
+	var memory Memory
 
-	if ownedBy == nil {
-		runtime.SetFinalizer(memory, func(memory *Memory) {
-			C.wasm_memory_delete(memory.inner())
-		})
+	memory.owned = true
+	newResult := cWasmerMemoryNew(&memory.memory, cUint32T(min), cUint32T(max))
+
+	if newResult != cWasmerOk {
+		var lastError, err = GetLastError()
+		var errorMessage = "Failed to allocate the memory:\n    %s"
+
+		if err != nil {
+			errorMessage = fmt.Sprintf(errorMessage, "(unknown details)")
+		} else {
+			errorMessage = fmt.Sprintf(errorMessage, lastError)
+		}
+
+		return nil, NewMemoryError(errorMessage)
 	}
 
-	return memory
+	return &memory, nil
 }
 
-// NewMemory instantiates a new Memory in the given Store.
-//
-// It takes two arguments, the Store and the MemoryType for the Memory.
-//
-//   memory := wasmer.NewMemory(
-//       store,
-//       wasmer.NewMemoryType(wasmer.NewLimits(1, 4)),
-//   )
-//
-func NewMemory(store *Store, ty *MemoryType) *Memory {
-	pointer := C.wasm_memory_new(store.inner(), ty.inner())
-
-	runtime.KeepAlive(store)
-	runtime.KeepAlive(ty)
-
-	return newMemory(pointer, nil)
+// Creates a new WebAssembly borrowed memory.
+func newBorrowedMemory(memory *cWasmerMemoryT) Memory {
+	return Memory{memory, false}
 }
 
-func (self *Memory) inner() *C.wasm_memory_t {
-	return self._inner
+// IsOwned checks whether the memory is owned, or borrowed.
+func (memory *Memory) IsOwned() bool {
+	return memory.owned
 }
 
-func (self *Memory) ownedBy() interface{} {
-	if self._ownedBy == nil {
-		return self
+// Length calculates the memory length (in bytes).
+func (memory *Memory) Length() uint32 {
+	if nil == memory.memory {
+		return 0
 	}
 
-	return self._ownedBy
+	return uint32(cWasmerMemoryDataLength(memory.memory))
 }
 
-// Type returns the Memory's MemoryType.
-//
-//   memory, _ := instance.Exports.GetMemory("exported_memory")
-//   ty := memory.Type()
-//
-func (self *Memory) Type() *MemoryType {
-	ty := C.wasm_memory_type(self.inner())
+// Data returns a slice of bytes over the WebAssembly memory.
+func (memory *Memory) Data() []byte {
+	if nil == memory.memory {
+		return make([]byte, 0)
+	}
 
-	runtime.KeepAlive(self)
-
-	return newMemoryType(ty, self.ownedBy())
-}
-
-// Size returns the Memory's size as Pages.
-//
-//   memory, _ := instance.Exports.GetMemory("exported_memory")
-//   size := memory.Size()
-//
-func (self *Memory) Size() Pages {
-	return Pages(C.wasm_memory_size(self.inner()))
-}
-
-// Size returns the Memory's size as a number of bytes.
-//
-//   memory, _ := instance.Exports.GetMemory("exported_memory")
-//   size := memory.DataSize()
-//
-func (self *Memory) DataSize() uint {
-	return uint(C.wasm_memory_data_size(self.inner()))
-}
-
-// Data returns the Memory's contents as an byte array.
-//
-//   memory, _ := instance.Exports.GetMemory("exported_memory")
-//   data := memory.Data()
-//
-func (self *Memory) Data() []byte {
-	length := int(self.DataSize())
-	data := (*C.byte_t)(C.wasm_memory_data(self.inner()))
-
-	runtime.KeepAlive(self)
+	var length = memory.Length()
+	var data = (*uint8)(cWasmerMemoryData(memory.memory))
 
 	var header reflect.SliceHeader
 	header = *(*reflect.SliceHeader)(unsafe.Pointer(&header))
 
 	header.Data = uintptr(unsafe.Pointer(data))
-	header.Len = length
-	header.Cap = length
+	header.Len = int(length)
+	header.Cap = int(length)
 
 	return *(*[]byte)(unsafe.Pointer(&header))
 }
 
-// Grow grows the Memory's size by a given number of Pages (the delta).
-//
-//   memory, _ := instance.Exports.GetMemory("exported_memory")
-//   grown := memory.Grow(2)
-//
-func (self *Memory) Grow(delta Pages) bool {
-	return bool(C.wasm_memory_grow(self.inner(), C.wasm_memory_pages_t(delta)))
+// Grow the memory by a number of pages (65kb each).
+func (memory *Memory) Grow(numberOfPages uint32) error {
+	if nil == memory.memory {
+		return nil
+	}
+
+	var growResult = cWasmerMemoryGrow(memory.memory, cUint32T(numberOfPages))
+
+	if growResult != cWasmerOk {
+		var lastError, err = GetLastError()
+		var errorMessage = "Failed to grow the memory:\n    %s"
+
+		if err != nil {
+			errorMessage = fmt.Sprintf(errorMessage, "(unknown details)")
+		} else {
+			errorMessage = fmt.Sprintf(errorMessage, lastError)
+		}
+
+		return NewMemoryError(errorMessage)
+	}
+
+	return nil
 }
 
-// IntoExtern converts the Memory into an Extern.
-//
-//   memory, _ := instance.Exports.GetMemory("exported_memory")
-//   extern := memory.IntoExtern()
-//
-func (self *Memory) IntoExtern() *Extern {
-	pointer := C.wasm_memory_as_extern(self.inner())
-
-	return newExtern(pointer, self.ownedBy())
+// Close closes/frees memory allocated at the NewMemory at time.
+func (memory *Memory) Close() {
+	// 从 lib 中获取内存的时候标志为 false, 表示从 lib 中借用的内存。
+	// instance 销毁的需要释放
+	if !memory.IsOwned() {
+		cWasmerMemoryDestroy(memory.memory)
+	}
 }

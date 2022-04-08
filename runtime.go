@@ -18,10 +18,9 @@ import (
 
 // RuntimeInstance wasm runtime
 type RuntimeInstance struct {
-	pool             *vmPool
-	log              *logger.CMLogger
-	chainId          string
-	instancesManager *InstancesManager
+	pool    *vmPool
+	log     *logger.CMLogger
+	chainId string
 }
 
 func (r *RuntimeInstance) Pool() *vmPool {
@@ -77,7 +76,8 @@ func (r *RuntimeInstance) Invoke(contract *commonPb.Contract, method string, byt
 	}
 
 	instance := instanceInfo.wasmInstance
-	instance.SetGasLimit(protocol.GasLimit - gasUsed)
+	instance.SetGasUsed(gasUsed)
+	instance.SetGasLimit(protocol.GasLimit)
 
 	var sc = NewSimContext(method, r.log, r.chainId)
 	defer sc.removeCtxPointer()
@@ -97,8 +97,8 @@ func (r *RuntimeInstance) Invoke(contract *commonPb.Contract, method string, byt
 	specialTxType = sc.SpecialTxType
 
 	// gas Log
-	gas := protocol.GasLimit - instance.GetGasRemaining()
-	if instance.GetGasRemaining() <= 0 {
+	gas := instance.GetGasUsed()
+	if gas > protocol.GasLimit {
 		err = fmt.Errorf("contract invoke failed, out of gas %d/%d, tx: %s", gas, int64(protocol.GasLimit),
 			txContext.GetTx().Payload.TxId)
 	}
@@ -110,11 +110,7 @@ func (r *RuntimeInstance) Invoke(contract *commonPb.Contract, method string, byt
 		msg := fmt.Sprintf("contract invoke failed, %s, tx: %s", err.Error(), txContext.GetTx().Payload.TxId)
 		r.log.Errorf(msg)
 		contractResult.Message = msg
-		if method == "init_contract" {
-			r.instancesManager.CloseAVmPool(contract)
-		} else {
-			instanceInfo.errCount++
-		}
+		instanceInfo.errCount++
 		return
 	}
 	contractResult.ContractEvent = sc.ContractEvent

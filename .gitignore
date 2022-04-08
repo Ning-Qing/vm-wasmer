@@ -8,9 +8,9 @@ bin
 *.log.*
 build
 pkg
+tests/_log/**
 .DS_Store
 nohup.out
+tests/functional_verify/chainmaker
 vendor
 tmp/
-tests/log/**
-tests/data

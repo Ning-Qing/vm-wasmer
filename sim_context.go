@@ -54,21 +54,16 @@ func NewSimContext(method string, log *logger.CMLogger, chainId string) *SimCont
 func (sc *SimContext) CallMethod(instance *wasmer.Instance) error {
 	var bytes []byte
 
-	runtimeFn, err := instance.Exports.GetRawFunction(protocol.ContractRuntimeTypeMethod)
-	if err != nil {
-		return fmt.Errorf("method [%s] not export, err = %v", protocol.ContractRuntimeTypeMethod, err)
+	runtimeFn, ok := instance.Exports[protocol.ContractRuntimeTypeMethod]
+	if !ok {
+		return fmt.Errorf("method [%s] not export", protocol.ContractRuntimeTypeMethod)
 	}
-	defer runtimeFn.Close()
-
-	sdkType, err := runtimeFn.Call()
+	sdkType, err := runtimeFn()
 	if err != nil {
 		return err
 	}
 
-	runtimeSdkType, ok := sdkType.(int32)
-	if !ok {
-		return fmt.Errorf("sdkType is not int32 type")
-	}
+	runtimeSdkType := sdkType.ToI32()
 	if int32(commonPb.RuntimeType_WASMER) == runtimeSdkType {
 		sc.parameters[protocol.ContractContextPtrParam] = []byte(strconv.Itoa(int(sc.CtxPtr)))
 		ec := serialize.NewEasyCodecWithMap(sc.parameters)
@@ -85,60 +80,42 @@ func (sc *SimContext) callContract(instance *wasmer.Instance, methodName string,
 
 	lengthOfSubject := len(bytes)
 
-	allocateFunc, err := instance.Exports.GetRawFunction(protocol.ContractAllocateMethod)
-	if err != nil {
-		return fmt.Errorf("method [%s] not export, err = %v", protocol.ContractAllocateMethod, err)
-	}
-	defer allocateFunc.Close()
-
+	exports := instance.Exports[protocol.ContractAllocateMethod]
 	// Allocate memory for the subject, and get a pointer to it.
-	allocateResult, err := allocateFunc.Call(lengthOfSubject)
+	allocateResult, err := exports(lengthOfSubject)
 	if err != nil {
 		sc.Log.Errorf("contract invoke %s failed, %s", protocol.ContractAllocateMethod, err.Error())
 		return fmt.Errorf("%s invoke failed. There may not be enough memory or CPU", protocol.ContractAllocateMethod)
 	}
-	dataPtr, ok := allocateResult.(int32)
-	if !ok {
-		return fmt.Errorf("allocateResult is not int32 type")
-	}
+	dataPtr := allocateResult.ToI32()
 
 	// Write the subject into the memory.
-	exportMemory, err := instance.Exports.GetMemory("memory")
-	if err != nil {
-		return fmt.Errorf("[%s] can't get exported memory, err = %v", protocol.ContractAllocateMethod, err)
-	}
-	memory := exportMemory.Data()[dataPtr:]
+	memory := instance.Memory.Data()[dataPtr:]
 
 	//copy(memory, bytes)
 	for nth := 0; nth < lengthOfSubject; nth++ {
 		memory[nth] = bytes[nth]
 	}
 
-	// fmt.Println("[sim_context.go]: callContract(...) was running...")
 	// Calls the `invoke` exported function. Given the pointer to the subject.
-	exportFunc, err := instance.Exports.GetRawFunction(methodName)
-	if err != nil {
-		return fmt.Errorf("find method [%s] failed, err = %v", methodName, err)
+	export, ok := instance.Exports[methodName]
+	if !ok {
+		return fmt.Errorf("method [%s] not export", methodName)
 	}
-	defer exportFunc.Close()
 
-	_, err = exportFunc.Call()
-	//fmt.Println("[sim_context.go]: callContract(...) finished.")
+	_, err = export()
 	if err != nil {
 		return err
 	}
 
+	// release wasm memory
+	//_, err = instance.Exports["deallocate"](dataPtr)
 	return err
 }
 
 // CallDeallocate deallocate vm memory before closing the instance
 func CallDeallocate(instance *wasmer.Instance) error {
-	instance.SetGasLimit(protocol.GasLimit)
-	deallocFunc, err := instance.Exports.GetFunction(protocol.ContractDeallocateMethod)
-	if err != nil {
-		return err
-	}
-	_, err = deallocFunc(0)
+	_, err := instance.Exports[protocol.ContractDeallocateMethod](0)
 	return err
 }
 
