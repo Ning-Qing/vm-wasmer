@@ -1,0 +1,16 @@
+./log
+module/vm/main
+.idea
+**/*.exe
+**/*.log
+release
+bin
+*.log.*
+build
+pkg
+.DS_Store
+nohup.out
+vendor
+tmp/
+tests/log/**
+tests/data
