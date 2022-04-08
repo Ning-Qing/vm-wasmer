@@ -17,7 +17,7 @@ import (
 	"chainmaker.org/chainmaker/logger/v2"
 	commonPb "chainmaker.org/chainmaker/pb-go/v2/common"
 	"chainmaker.org/chainmaker/utils/v2"
-	wasmergo "github.com/Ning-Qing/vm-wasmer/wasmer-go"
+	wasmergo "github.com/Ning-Qing/vm-wasmer/v2/wasmer-go"
 )
 
 const (

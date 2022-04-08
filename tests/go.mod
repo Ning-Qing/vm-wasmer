@@ -11,7 +11,7 @@ require (
 	chainmaker.org/chainmaker/protocol/v2 v2.2.0
 	chainmaker.org/chainmaker/store/v2 v2.2.0
 	chainmaker.org/chainmaker/utils/v2 v2.2.0
-	github.com/Ning-Qing/vm-wasmer v2.1.1-0.20211213113148-e0a4ba64d0ed
+	github.com/Ning-Qing/vm-wasmer/v2 v2.1.1-0.20211213113148-e0a4ba64d0ed
 	chainmaker.org/chainmaker/vm/v2 v2.2.0
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/mock v1.6.0
@@ -22,6 +22,6 @@ require (
 )
 
 replace (
-	github.com/Ning-Qing/vm-wasmer => ../
+	github.com/Ning-Qing/vm-wasmer/v2 => ../
 	google.golang.org/grpc => google.golang.org/grpc v1.26.0
 )

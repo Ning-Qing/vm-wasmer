@@ -17,7 +17,7 @@ import (
 	"chainmaker.org/chainmaker/protocol/v2"
 	"chainmaker.org/chainmaker/vm-wasmer-test/v2/accesscontrol"
 	"chainmaker.org/chainmaker/vm/v2"
-	wasmer "github.com/Ning-Qing/vm-wasmer"
+	wasmer "github.com/Ning-Qing/vm-wasmer/v2"
 )
 
 func InitVmManager(store protocol.BlockchainStore, chainConfig *chainconf.ChainConf) (protocol.VmManager, error) {

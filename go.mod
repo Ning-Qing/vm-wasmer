@@ -1,4 +1,4 @@
-module github.com/Ning-Qing/vm-wasmer
+module github.com/Ning-Qing/vm-wasmer/v2
 
 go 1.15
 

@@ -24,7 +24,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/Ning-Qing/vm-wasmer/wasmer-go"
+	"github.com/Ning-Qing/vm-wasmer/v2/wasmer-go"
 )
 
 func main() {
